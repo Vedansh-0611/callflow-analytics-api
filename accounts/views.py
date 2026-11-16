@@ -19,6 +19,7 @@ from .serializers import (
     UserSerializer,
     WebhookSecretSerializer,
 )
+from .throttling import AuthRateThrottle
 from .tenancy import IsOrgAdmin, IsOrgMember, IsSignedInUser, OrgScopedQuerysetMixin
 
 
@@ -35,6 +36,7 @@ class SignupView(APIView):
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [AuthRateThrottle]
 
     def post(self, request):
         serializer = SignupSerializer(data=request.data)
@@ -47,6 +49,7 @@ class LoginView(APIView):
     """Exchange email and password for an access and a refresh token."""
 
     permission_classes = [AllowAny]
+    throttle_classes = [AuthRateThrottle]
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data)

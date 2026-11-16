@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -50,6 +51,14 @@ def make_tenant(name="Acme", email="owner@acme.test"):
     org = create_organization(name, owner=owner)
     _, raw_key = ApiKey.objects.create_key(org, name="test")
     return Tenant(org=org, owner=owner, api_key=raw_key)
+
+
+@pytest.fixture(autouse=True)
+def clear_cache():
+    # Rate-limit counters live in the cache; start every test with none.
+    cache.clear()
+    yield
+    cache.clear()
 
 
 @pytest.fixture

@@ -105,7 +105,31 @@ REST_FRAMEWORK = {
         "rest_framework.filters.SearchFilter",
         "rest_framework.filters.OrderingFilter",
     ],
+    "DEFAULT_THROTTLE_CLASSES": [
+        "accounts.throttling.ApiKeyRateThrottle",
+        "accounts.throttling.DashboardUserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "user": os.environ.get("USER_THROTTLE_RATE", "300/min"),
+    },
+    # How many proxies sit in front of the app (Render: 1). Used to read the
+    # client IP for per-IP limits without trusting a spoofed X-Forwarded-For.
+    "NUM_PROXIES": int(os.environ.get("NUM_PROXIES", "0")),
 }
+
+API_KEY_THROTTLE_RATE = os.environ.get("API_KEY_THROTTLE_RATE", "120/min")
+AUTH_THROTTLE_RATE = os.environ.get("AUTH_THROTTLE_RATE", "10/min")
+
+# Redis when available, so rate-limit counters are shared by all workers.
+REDIS_URL = os.environ.get("REDIS_URL", "")
+if REDIS_URL:
+    CACHES = {"default": {"BACKEND": "django.core.cache.backends.redis.RedisCache", "LOCATION": REDIS_URL}}
+else:
+    CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+# Largest request body Django will read at all, and the stricter webhook limit.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 1024 * 1024
+WEBHOOK_MAX_BODY_BYTES = int(os.environ.get("WEBHOOK_MAX_BODY_BYTES", str(64 * 1024)))
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.environ.get("JWT_ACCESS_MINUTES", "15"))),
@@ -116,7 +140,7 @@ SIMPLE_JWT = {
 CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS", "http://localhost:5173")
 
 # Celery
-CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", REDIS_URL or "redis://localhost:6379/0")
 CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", False)
 CELERY_TASK_EAGER_PROPAGATES = True
 CELERY_TASK_ACKS_LATE = True

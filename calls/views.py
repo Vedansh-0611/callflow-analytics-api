@@ -3,6 +3,7 @@ import logging
 
 from django.conf import settings
 from rest_framework import generics, status
+from rest_framework.exceptions import APIException
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -20,6 +21,12 @@ from .stats import build_stats
 logger = logging.getLogger(__name__)
 
 
+class PayloadTooLarge(APIException):
+    status_code = status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+    default_detail = "Webhook body is larger than the allowed size."
+    default_code = "payload_too_large"
+
+
 class CallWebhookView(APIView):
     """Receives call events from the telephony provider.
 
@@ -34,7 +41,15 @@ class CallWebhookView(APIView):
 
     def post(self, request):
         org = request.organization
+        # Refuse oversized bodies before reading them into memory. Content-Length
+        # can be missing or wrong, so the length is checked again after reading.
+        limit = settings.WEBHOOK_MAX_BODY_BYTES
+        if int(request.META.get("CONTENT_LENGTH") or 0) > limit:
+            raise PayloadTooLarge()
         raw_body = request.body  # verify the exact bytes that were signed
+        if len(raw_body) > limit:
+            raise PayloadTooLarge()
+
         try:
             verify_signature(
                 secret=org.active_webhook_secrets(),

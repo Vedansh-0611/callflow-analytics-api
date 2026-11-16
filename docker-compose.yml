@@ -2,7 +2,7 @@ x-app: &app
   build: .
   environment:
     DATABASE_URL: postgres://callflow:callflow@postgres:5432/callflow
-    CELERY_BROKER_URL: redis://redis:6379/0
+    REDIS_URL: redis://redis:6379/0
     DJANGO_DEBUG: "true"
     DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1,web"
     CORS_ALLOWED_ORIGINS: http://localhost:5173
