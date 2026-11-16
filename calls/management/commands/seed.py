@@ -91,7 +91,7 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def demo_workspace(self, slug):
-        org, _ = Organization.objects.get_or_create(slug=slug, defaults={"name": "Acme Health (demo)"})
+        org, _ = Organization.objects.get_or_create(slug=slug, defaults={"name": "Acme Health"})
         user, created = get_user_model().objects.get_or_create(
             username=DEMO_EMAIL, defaults={"email": DEMO_EMAIL, "first_name": "Demo User"}
         )

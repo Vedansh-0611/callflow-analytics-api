@@ -1,210 +1,280 @@
-# callflow-analytics-api
+# CallFlow API
 
 [![CI](https://github.com/Vedansh-0611/callflow-analytics-api/actions/workflows/ci.yml/badge.svg)](https://github.com/Vedansh-0611/callflow-analytics-api/actions/workflows/ci.yml)
 
-A Django REST Framework service that ingests call-event webhooks from a voice / telephony
-provider (for example an AI voice agent platform), stores every call with its event timeline,
-and computes per-call cost and outcome tags in a Celery worker.
+**CallFlow is a multi-tenant call analytics service for AI voice agents.** A company plugs its
+telephony or voice-agent provider into CallFlow's signed webhook. CallFlow stores every call with
+its event timeline, works out what each call cost (LLM tokens plus telephony minutes) and how it
+ended, then shows it on a dashboard and pushes a signed `call.summarized` event back to the
+company's own systems.
 
-**Frontend:** [callflow-dashboard](https://github.com/Vedansh-0611/callflow-dashboard)
-([live demo](https://vedansh-0611.github.io/callflow-dashboard/)) visualizes the data this API serves.
+This repo is the backend: Django, Django REST Framework, Celery, PostgreSQL and Redis.
 
-**Stack:** Python 3.12, Django 5.1, Django REST Framework, Celery, Redis, PostgreSQL (SQLite for
-local dev), pytest, Docker Compose, GitHub Actions.
+- **Dashboard:** [callflow-dashboard](https://github.com/Vedansh-0611/callflow-dashboard), live demo
+  at **https://vedansh-0611.github.io/callflow-dashboard/** (demo mode, mock data, no backend needed)
+- **API docs:** `/api/docs/` (Swagger UI) and `/api/redoc/` on any running instance
 
-## What it does
+## Features
 
-- `POST /api/webhooks/calls/` accepts four event types: `call.started`, `transcript.chunk`,
-  `tool.called`, and `call.ended` (with duration and LLM token usage).
-- Every request must carry a valid **HMAC-SHA256 signature** and a recent timestamp.
-- Events are **idempotent** on `event_id`, so provider retries never create duplicates.
-- When a call ends, a **Celery task** computes its cost from a configurable price table
-  (LLM tokens + per-minute telephony) and derives outcome tags such as `resolved`,
-  `transferred`, `voicemail`, `tool_failed` and `booking_made`.
-- Read API: paginated and filterable call list, call detail with the event timeline, and
-  aggregate stats (calls per day, average duration, cost per day, tag counts).
+| Area | What it does |
+|------|--------------|
+| **Multi-tenancy** | Organizations with owner / admin / member roles. Every call, event, key, endpoint and usage row belongs to one org; querysets are always filtered by the request's org. Tests prove one org cannot read, guess or modify another's data. |
+| **Auth** | Email/password signup and login returning JWTs (dashboard). Org API keys for servers: shown once, stored as SHA-256 hashes, looked up by prefix, revocable. |
+| **Signed, idempotent ingestion** | `POST /api/webhooks/calls/` needs the org's API key **and** an HMAC-SHA256 signature made with the org's webhook secret. Duplicate `event_id`s return `200 duplicate`, so provider retries are safe. Secrets rotate with a 24 h grace period. |
+| **Async processing** | When a call ends, a Celery task computes cost and outcome tags (`resolved`, `transferred`, `tool_failed`, `booking_made`...), queued only after the transaction commits. |
+| **Rate limits** | Per-API-key throttle from the org's plan (Free 60/min, Pro 600/min) with counters in Redis, per-user and per-IP login limits, and a 64 KB cap on webhook bodies (413). |
+| **Plans and metering** | Free and Pro plans. Calls and billed minutes are metered per month. A new call past the limit gets a **402** with a machine-readable body; calls already in progress can still finish. Plan changes go through a `BillingProvider` interface (fake provider included, Stripe hook point documented). |
+| **Outbound webhooks** | Orgs register endpoints for `call.summarized`. Deliveries are stored, signed like inbound webhooks, and retried by Celery with exponential backoff and jitter. Test pings and a delivery log are available. |
+| **Operations** | OpenAPI schema, `/api/health/` and `/api/ready/`, JSON logs with request ids that follow a request into Celery, env-gated Sentry, security headers, whitenoise, gunicorn, a multi-stage non-root Docker image and a Render blueprint. |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    P[Telephony / voice-agent provider] -- signed webhook --> W[Django + DRF<br/>/api/webhooks/calls/]
-    W -- verify HMAC, validate,<br/>store event once --> DB[(PostgreSQL)]
-    W -- on commit: summarize_call.delay --> R[(Redis broker)]
-    R --> C[Celery worker]
-    C -- cost + outcome tags --> DB
-    D[React dashboard] -- REST: /calls, /calls/:id, /stats --> API[Django + DRF read API]
-    API --> DB
+    subgraph Customer["Customer (one organization)"]
+        P[Telephony / voice-agent provider]
+        R[Customer's webhook receiver]
+        U[Team in the dashboard]
+    end
+
+    subgraph CallFlow
+        W["Django + DRF (gunicorn)"]
+        DB[(PostgreSQL)]
+        RD[("Redis: broker + rate-limit counters")]
+        C[Celery worker]
+    end
+
+    P -- "X-API-Key + HMAC signature" --> W
+    U -- "JWT + X-Organization" --> W
+    W -- "resolve org, check plan, store event once" --> DB
+    W -- "throttle counters" --> RD
+    W -- "on commit: summarize_call" --> RD
+    RD --> C
+    C -- "cost, tags" --> DB
+    C -- "signed call.summarized, retries with backoff" --> R
 ```
 
-Request flow for one `call.ended` webhook:
+**One webhook, end to end**
 
-1. Verify `X-Webhook-Signature` against `"<timestamp>.<raw body>"` and reject stale timestamps.
-2. Validate the JSON body with a DRF serializer.
-3. In one transaction: get or create the `Call`, lock its row, skip if the `event_id` already
-   exists, store the `CallEvent`, update the call (duration, tokens, status).
-4. After the commit, enqueue `summarize_call`. Respond `202 Accepted` right away.
-5. The worker loads the call and its events, computes cost and tags, and saves them.
+1. `ApiKeyAuthentication` finds the key by its prefix and checks the hash: this says *which org*.
+2. The per-key throttle (plan-based, Redis) runs; oversized bodies are refused with 413.
+3. The HMAC signature over `"<timestamp>.<raw body>"` is checked against the org's current (or
+   just-rotated) secret, with a 5-minute replay window: this says *the body is genuine*.
+4. In one transaction: a retry of a known `event_id` returns `200 duplicate` right away; a new
+   call is checked against the plan (402 if over) and metered; the call row is locked, the event
+   stored, the call updated.
+5. After commit, `summarize_call` is queued and the API answers `202`.
+6. The worker computes cost and tags. On the first summary it stores one `WebhookDelivery` per
+   subscribed endpoint (unique per event id) and `deliver_webhook` sends it, retrying failures
+   after 30 s, 60 s, 120 s and so on, up to 5 retries.
 
-## Data model
+**Tenancy model**
 
-| Model       | Key fields                                                                                   | Indexes                                                             |
-|-------------|----------------------------------------------------------------------------------------------|---------------------------------------------------------------------|
-| `Call`      | `provider_call_id` (unique), agent, direction, numbers, status, started/ended, duration, end reason, model, tokens, `cost_usd`, `outcome_tags` | `started_at`, `(status, started_at)`, `(agent_id, started_at)` |
-| `CallEvent` | `event_id` (unique), `call` FK, `type`, `occurred_at`, `data` (JSON)                          | `(call, occurred_at)` for the timeline                               |
-
-## Running it
-
-### Option 1: Docker Compose (web, worker, Postgres, Redis)
-
-```bash
-cp .env.example .env          # optional, compose has sane defaults
-make up                       # docker compose up --build -d, then seeds demo data
-make webhook                  # send a signed sample call through the full pipeline
-make logs                     # watch the web and worker logs
+```mermaid
+erDiagram
+    Organization ||--o{ Membership : has
+    User ||--o{ Membership : has
+    Organization ||--o{ ApiKey : owns
+    Organization ||--|| Subscription : "is on"
+    Plan ||--o{ Subscription : "priced by"
+    Organization ||--o{ UsageCounter : "one per month"
+    Organization ||--o{ Call : owns
+    Call ||--o{ CallEvent : timeline
+    Organization ||--o{ WebhookEndpoint : owns
+    WebhookEndpoint ||--o{ WebhookDelivery : attempts
 ```
 
-The API is on http://localhost:8000/api/.
+## API quickstart
 
-### Option 2: Local virtualenv (SQLite, no Redis needed)
+Start the stack and create a demo org, user and API key:
 
 ```bash
-make install                  # python3 -m venv .venv && pip install -r requirements-dev.txt
-cp .env.example .env          # then set CELERY_TASK_ALWAYS_EAGER=true to skip the worker
-make migrate
-make seed                     # 200 fake calls over the last 14 days
-make run                      # http://localhost:8000
+docker compose up --build -d
+docker compose exec web python manage.py seed      # prints the login, API key and webhook secret
+export CALLFLOW_API_KEY=cf_xxxxxxxx_...           # from the seed output
+export CALLFLOW_WEBHOOK_SECRET=whsec_...
 ```
 
-To use a real worker instead, keep `CELERY_TASK_ALWAYS_EAGER=false`, start Redis, and run
-`make worker` in a second terminal.
-
-### Tests
+Send a signed event:
 
 ```bash
-make test                     # pytest, SQLite + Celery eager mode
-```
-
-CI runs the same suite against PostgreSQL 16, checks for missing migrations, and then boots
-the full Docker Compose stack and sends signed webhooks end to end.
-
-## API
-
-| Method | Path                       | Description                                                                 |
-|--------|----------------------------|-----------------------------------------------------------------------------|
-| POST   | `/api/webhooks/calls/`     | Ingest one event (signed)                                                  |
-| GET    | `/api/calls/`              | List calls. Filters: `status`, `agent_id`, `direction`, `end_reason`, `started_after`, `started_before`, `min_duration`, `max_duration`. Also `search`, `ordering`, `page`, `page_size` |
-| GET    | `/api/calls/<call_id>/`    | Call detail with its event timeline                                        |
-| GET    | `/api/stats/?days=14`      | Totals, per-day series and outcome tag counts (1 to 90 days)               |
-| GET    | `/api/health/`             | Health check                                                               |
-
-If `API_KEY` is set, read endpoints require an `X-API-Key` header. Webhooks always use the
-HMAC signature instead.
-
-### Sample requests
-
-Sending a signed webhook with curl and openssl:
-
-```bash
-SECRET=local-dev-secret
-BODY='{"event_id":"evt_001","type":"call.started","call_id":"call_demo_1","timestamp":"2026-01-10T10:00:00Z","data":{"agent_id":"clinic-receptionist","direction":"inbound","from":"+919800000001","to":"+918000000000"}}'
+BODY='{"event_id":"evt_001","type":"call.started","call_id":"call_demo_1","timestamp":"2026-01-10T10:00:00Z","data":{"agent_id":"clinic-receptionist","direction":"inbound"}}'
 TS=$(date +%s)
-SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')
+SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$CALLFLOW_WEBHOOK_SECRET" | awk '{print $NF}')
 
 curl -X POST http://localhost:8000/api/webhooks/calls/ \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: $CALLFLOW_API_KEY" \
   -H "X-Webhook-Timestamp: $TS" \
   -H "X-Webhook-Signature: sha256=$SIG" \
   -d "$BODY"
-# {"status":"accepted","event_id":"evt_001"}   (send it again: {"status":"duplicate"})
+# 202 {"status":"accepted","event_id":"evt_001"}    send it again: 200 {"status":"duplicate"}
 ```
 
-A `call.ended` event carries usage:
+Or send a whole call (start, transcript, tool call, end, plus a retry) with
+`python scripts/send_event.py`.
 
-```json
-{
-  "event_id": "evt_005",
-  "type": "call.ended",
-  "call_id": "call_demo_1",
-  "timestamp": "2026-01-10T10:01:35Z",
-  "data": {
-    "duration_seconds": 95,
-    "end_reason": "completed",
-    "usage": { "model": "gpt-4o-mini", "prompt_tokens": 1800, "completion_tokens": 350 }
-  }
-}
-```
-
-Reading data:
+Read data with the same key:
 
 ```bash
-curl "http://localhost:8000/api/calls/?status=completed&agent_id=clinic-receptionist&page_size=10"
-curl "http://localhost:8000/api/calls/?started_after=2026-01-01T00:00:00Z&ordering=-cost_usd"
-curl "http://localhost:8000/api/calls/call_demo_1/"
-curl "http://localhost:8000/api/stats/?days=7"
+curl -H "X-API-Key: $CALLFLOW_API_KEY" "http://localhost:8000/api/calls/?status=completed&ordering=-cost_usd"
+curl -H "X-API-Key: $CALLFLOW_API_KEY" "http://localhost:8000/api/calls/call_demo_1/"
+curl -H "X-API-Key: $CALLFLOW_API_KEY" "http://localhost:8000/api/stats/?days=7"
 ```
 
-Example `/api/stats/` response (trimmed):
+Dashboard-style access with a JWT:
 
-```json
-{
-  "range": { "from": "2026-01-09", "to": "2026-01-15", "days": 7 },
-  "totals": { "calls": 99, "completed": 94, "failed": 5, "avg_duration": 163.4, "total_cost_usd": 3.8714, "total_tokens": 311725 },
-  "per_day": [{ "date": "2026-01-09", "calls": 13, "avg_duration": 143.4, "cost_usd": 0.4909 }],
-  "outcome_tags": { "resolved": 47, "tool_used": 42, "customer_hung_up": 25 }
-}
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login/ -H 'Content-Type: application/json' \
+  -d '{"email":"demo@callflow.dev","password":"callflow-demo"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["access"])')
+curl -H "Authorization: Bearer $TOKEN" -H "X-Organization: demo" http://localhost:8000/api/billing/
 ```
 
-## Design decisions
+Register an endpoint for `call.summarized` (the response shows its signing secret once):
 
-**Idempotency on `event_id`.** Webhook providers retry on timeouts and 5xx responses, so the
-same event can arrive more than once. `CallEvent.event_id` has a unique constraint. Ingestion
-checks for an existing event inside a transaction (with the call row locked), and an
-`IntegrityError` from a race is also treated as a duplicate. Duplicates return `200` so the
-provider stops retrying. The summary task is idempotent too: it always recomputes from stored
-data.
+```bash
+curl -X POST http://localhost:8000/api/webhook-endpoints/ -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"url":"https://example.com/hooks/callflow"}'
+```
 
-**Signature verification.** The provider signs `"<timestamp>.<raw body>"` with a shared secret
-(HMAC-SHA256). The view verifies the raw request bytes before parsing JSON, compares with
-`hmac.compare_digest` to avoid timing leaks, and rejects timestamps outside a 5-minute window
-to block replays.
+When a plan limit is hit:
 
-**Async processing.** The webhook endpoint only does cheap work (verify, validate, insert) and
-answers `202` fast, which keeps provider timeouts away. Cost and tag computation runs in Celery.
-The task is enqueued with `transaction.on_commit`, so the worker never reads data that has not
-been committed yet. The task retries with backoff on database errors.
+```
+HTTP 402
+{"detail": "The Free plan includes 500 calls per month and this month's are used up. Upgrade the plan to keep ingesting new calls.",
+ "code": "plan_limit_exceeded", "limit": "monthly_calls", "plan": "free", "used": 500, "allowed": 500}
+```
 
-**Out-of-order events.** Delivery order is not guaranteed. A transcript chunk can arrive before
-`call.started`; the call is created anyway with a placeholder start time that the real
-`call.started` later corrects. If `call.ended` arrives first, the start time is estimated from
-the duration.
+### Endpoints
 
-**Cost calculation.** The price table (USD per 1M input/output tokens per model, plus a default
-for unknown models) lives in settings and can be overridden with `MODEL_PRICING_JSON`.
-Telephony is billed per started minute. All money math uses `Decimal`.
+| Area | Endpoints |
+|------|-----------|
+| Auth | `POST /api/auth/signup/`, `POST /api/auth/login/`, `POST /api/auth/refresh/`, `GET /api/auth/me/` |
+| Orgs | `GET/POST /api/orgs/`, `GET /api/orgs/current/`, `GET/POST /api/orgs/current/webhook-secret/` (view / rotate) |
+| API keys | `GET/POST /api/api-keys/`, `DELETE /api/api-keys/<id>/` (revoke) |
+| Ingestion | `POST /api/webhooks/calls/` (API key + signature) |
+| Analytics | `GET /api/calls/` (filters, search, ordering, pagination), `GET /api/calls/<id>/`, `GET /api/stats/?days=` |
+| Outbound | `/api/webhook-endpoints/` CRUD, `POST .../<id>/rotate-secret/`, `POST .../<id>/test/`, `GET .../<id>/deliveries/` |
+| Billing | `GET /api/billing/`, `POST /api/billing/change-plan/` |
+| Ops | `GET /api/health/`, `GET /api/ready/`, `/api/schema/`, `/api/docs/`, `/api/redoc/` |
 
-**Indexes.** They match the actual queries: the list view orders by `started_at`, the dashboard
-filters by status or agent within a date range, and the detail view loads one call's events in
-time order.
+Roles: members can read analytics and usage. Owners and admins also manage keys, secrets,
+endpoints and the plan. API keys can ingest and read, never manage the org.
 
-**What I would add for production.** Proper auth (JWT or per-tenant API keys), multi-tenancy,
-a dead-letter queue for failed tasks, rate limiting on the webhook, structured logging and
-metrics, and moving outcome tags into their own table if tag-based filtering at scale is needed.
+## Running it
+
+**Docker Compose** (production image and settings, over plain http):
+
+```bash
+make up          # web (gunicorn), worker (Celery), Postgres, Redis + seed data
+make logs        # JSON logs; follow one request with its request_id
+```
+
+**Local virtualenv** (SQLite, no Redis, tasks run inline):
+
+```bash
+make install && cp .env.example .env    # set CELERY_TASK_ALWAYS_EAGER=true
+make migrate && make seed && make run   # http://localhost:8000/api/docs/
+```
+
+**Checks:**
+
+```bash
+make test        # pytest (SQLite, Celery eager)
+make lint        # ruff
+make schema      # OpenAPI schema must validate with zero warnings
+```
+
+CI runs ruff, the migration check, schema validation and the test suite on PostgreSQL 16, then
+builds the Docker image, boots the full stack and exercises it from outside: readiness, signed
+ingestion through the worker, 401s without credentials, JWT login and the docs page.
+
+## Deploy to Render
+
+`render.yaml` describes the whole stack: the web service (Docker, `docker/entrypoint.sh web`
+runs migrations then gunicorn), a Celery worker, PostgreSQL and a Key Value (Redis) instance.
+
+1. Fork or push this repo to your GitHub account.
+2. In Render: **New > Blueprint**, pick the repo, and apply. Render generates
+   `DJANGO_SECRET_KEY` and wires `DATABASE_URL` and `REDIS_URL`.
+3. Optional: set `SENTRY_DSN` on the shared env group.
+4. Seed a demo workspace from the web service's **Shell** tab: `python manage.py seed`.
+5. Point the dashboard at it: build `callflow-dashboard` with
+   `VITE_API_URL=https://<your-service>.onrender.com`, and keep that origin in
+   `CORS_ALLOWED_ORIGINS` (the blueprint already allows the GitHub Pages origin).
+
+Render's free tier has no background workers. To stay at $0, delete the worker from the
+blueprint and set `CELERY_TASK_ALWAYS_EAGER=true` on the web service: tasks then run inside the
+request. Free instances also sleep when idle, so the first request after a while is slow.
+
+## Design decisions and trade-offs
+
+**Shared database, `organization_id` on every row.** Simpler to run and migrate than a schema or
+database per tenant, and fine at this scale. The risk is a query that forgets the filter, so
+scoping lives in one mixin (`OrgScopedQuerysetMixin`), the default permission resolves the org on
+every request, and a view without it fails closed (no `request.organization`, so an error, not
+another tenant's rows). Ids from providers are unique *per org*, and every index leads with
+`organization_id` because every query filters by it. Postgres row-level security would be the
+next layer of defence.
+
+**API key and signature, not one or the other.** The key identifies the org and can be revoked
+on its own; the HMAC proves the body is unchanged and recent. A leaked key alone cannot forge
+events, and a leaked secret alone does not say which org to target.
+
+**SHA-256 for API keys, not bcrypt.** Keys are 160 random bits, so there is nothing to brute
+force, and a fast hash keeps auth cheap on every request. The prefix (`cf_1a2b3c4d`) is indexed
+for a single-row lookup and safe to show in the UI. `last_used_at` is written at most once a
+minute so reads do not turn into writes.
+
+**Idempotency in the database.** `(organization, event_id)` is a unique constraint, the check
+happens inside a transaction with the call row locked, and an `IntegrityError` from a race is
+treated as a duplicate. Duplicates are answered *before* the plan check, so a retry of an
+accepted event can never get a 402.
+
+**402 for quotas, 429 for rate.** 429 means "slow down, try again shortly"; 402 means "this will
+keep failing until the plan changes". Only new calls are refused, so a call is never cut off
+halfway. The check-then-increment is not locked, so under heavy concurrency an org can go a few
+calls over; that soft limit is a deliberate trade for not serializing all ingestion per org.
+
+**Outbound delivery is a stored row first.** `WebhookDelivery` is written before anything is
+sent, unique on `(endpoint, event_id)`, and the task skips deliveries that already succeeded. So
+re-running a summary or a task never double-sends, and the log shows every attempt. Receivers
+get the event id in `X-CallFlow-Delivery` to dedupe on their side too.
+
+**Billing behind an interface.** `BillingProvider.change_plan()` is the only way plans change and
+`services.apply_plan()` is the only place it is written. A Stripe provider would return a
+checkout URL and grant the plan from Stripe's webhook, without touching views or limits.
+
+**Migrating to tenancy safely.** Adding `organization` was split into two migrations: add a
+nullable column and backfill existing rows into a Default org, then make it required and swap
+the unique constraints. That is the pattern that works on a live table.
+
+**SSRF basics.** In production, endpoint URLs must be https and cannot be localhost, `.internal`
+or private / link-local IP literals. DNS-resolution checks are on the roadmap.
+
+**Plain secrets for HMAC.** Webhook secrets must be readable to verify signatures, so they are
+stored as-is (never in logs or the admin). Encrypting them at rest with a KMS key is the next step.
+
+## Roadmap
+
+- Invitations and member management (invite by email, change roles, remove)
+- Auto-disable endpoints after repeated failures, and manual redelivery from the log
+- Stripe provider and its webhook behind the existing `BillingProvider`
+- Postgres row-level security as a second tenancy guard; KMS-encrypted secrets
+- DNS-based SSRF protection for endpoint URLs
+- Audit log (who created or revoked a key, rotated a secret, changed the plan)
+- Prometheus metrics (ingest latency, queue depth, delivery success rate)
 
 ## Project layout
 
 ```
-config/            settings, URLs, Celery app
-calls/
-  models.py        Call, CallEvent
-  signatures.py    HMAC verification
-  services.py      ingestion: idempotent insert + call state updates
-  tasks.py         summarize_call Celery task
-  pricing.py       cost calculation
-  outcomes.py      outcome tag rules
-  stats.py         aggregate stats query
-  views.py         webhook + read API
-  management/commands/seed.py
-scripts/send_event.py   signed sample webhooks (stdlib only)
-tests/             pytest suite
+config/          settings, URLs, Celery app
+core/            request ids, JSON logging, health/readiness, OpenAPI auth extension
+accounts/        organizations, memberships, API keys, JWT auth views, tenancy and throttles
+billing/         plans, subscriptions, usage metering, BillingProvider
+calls/           models, signed ingestion, cost and outcome rules, stats, summarize task
+outbound/        webhook endpoints, deliveries, signed delivery task with backoff
+docker/          entrypoint (web | worker)
+tests/           pytest: tenancy, auth, API keys, throttling, billing, outbound, ingestion, ops
+render.yaml      Render blueprint (web, worker, Postgres, Redis)
 ```
