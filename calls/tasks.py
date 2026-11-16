@@ -4,9 +4,12 @@ from celery import shared_task
 from django.db import OperationalError
 from django.utils import timezone
 
+from outbound.services import dispatch_event
+
 from .models import Call, CallEvent
 from .outcomes import derive_outcome_tags
 from .pricing import calculate_cost
+from .serializers import CallListSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +20,9 @@ def summarize_call(call_pk):
 
     Safe to run more than once: it always recomputes from stored data.
     """
-    call = Call.objects.get(pk=call_pk)
+    call = Call.objects.select_related("organization").get(pk=call_pk)
     events = list(call.events.all())
+    first_summary = call.summarized_at is None
 
     call.cost_usd = calculate_cost(
         model=call.llm_model,
@@ -41,4 +45,14 @@ def summarize_call(call_pk):
         ]
     )
     logger.info("summarized call %s cost=%s tags=%s", call.provider_call_id, call.cost_usd, call.outcome_tags)
+
+    if first_summary:
+        # Re-running the task (it is idempotent) must not notify customers again.
+        # dispatch_event is idempotent on the event id as a second safeguard.
+        dispatch_event(
+            call.organization,
+            "call.summarized",
+            event_id=f"call.summarized.{call.provider_call_id}",
+            data=CallListSerializer(call).data,
+        )
     return {"call": call.provider_call_id, "cost_usd": str(call.cost_usd), "tags": call.outcome_tags}

@@ -36,6 +36,7 @@ INSTALLED_APPS = [
     "accounts",
     "billing",
     "calls",
+    "outbound",
 ]
 
 MIDDLEWARE = [
@@ -164,6 +165,14 @@ if os.environ.get("MODEL_PRICING_JSON"):
     MODEL_PRICING.update(json.loads(os.environ["MODEL_PRICING_JSON"]))
 
 TELEPHONY_COST_PER_MINUTE = os.environ.get("TELEPHONY_COST_PER_MINUTE", "0.010")
+
+# Outbound webhooks (call.summarized and friends).
+OUTBOUND_WEBHOOK_TIMEOUT_SECONDS = 5
+OUTBOUND_WEBHOOK_MAX_RETRIES = int(os.environ.get("OUTBOUND_WEBHOOK_MAX_RETRIES", "5"))
+OUTBOUND_WEBHOOK_BACKOFF_BASE = 30  # seconds; doubles on every retry
+OUTBOUND_WEBHOOK_BACKOFF_CAP = 60 * 60
+# Plain http and internal hosts are only allowed in development.
+ALLOW_INSECURE_WEBHOOK_URLS = env_bool("ALLOW_INSECURE_WEBHOOK_URLS", DEBUG)
 
 # Billing. New organizations start on this plan; see billing/providers.py for
 # where a real payment provider plugs in.
