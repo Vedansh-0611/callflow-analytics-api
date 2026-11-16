@@ -18,6 +18,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from accounts.models import ApiKey, Membership, Organization
+from billing.models import UsageCounter
+from billing.services import PlanLimitExceeded
 from calls.models import Call
 from calls.services import ingest_event
 
@@ -64,18 +66,24 @@ class Command(BaseCommand):
 
         if options["flush"]:
             Call.objects.filter(organization=org).delete()
+            UsageCounter.objects.filter(organization=org).delete()
 
         now = timezone.now()
-        for _ in range(options["calls"]):
-            started_at = now - timedelta(
-                days=rng.randint(0, options["days"] - 1),
-                hours=rng.randint(0, 10),
-                minutes=rng.randint(10, 59),
-            )
-            for payload in self.fake_call_events(rng, started_at):
-                ingest_event(org, payload)
+        created = 0
+        try:
+            for _ in range(options["calls"]):
+                started_at = now - timedelta(
+                    days=rng.randint(0, options["days"] - 1),
+                    hours=rng.randint(0, 10),
+                    minutes=rng.randint(10, 59),
+                )
+                for payload in self.fake_call_events(rng, started_at):
+                    ingest_event(org, payload)
+                created += 1
+        except PlanLimitExceeded as exc:
+            self.stdout.write(self.style.WARNING(f"Stopped early: {exc.detail['detail']} Use --flush to start over."))
 
-        self.stdout.write(self.style.SUCCESS(f"Seeded {options['calls']} calls into '{org.slug}'."))
+        self.stdout.write(self.style.SUCCESS(f"Seeded {created} calls into '{org.slug}'."))
         self.stdout.write(f"Dashboard login: {user.email} / {DEMO_PASSWORD}")
         self.stdout.write(f"CALLFLOW_ORG={org.slug}")
         self.stdout.write(f"CALLFLOW_API_KEY={raw_key}")

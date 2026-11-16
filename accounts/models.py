@@ -105,7 +105,7 @@ class ApiKeyQuerySet(models.QuerySet):
             return None
         # The prefix is indexed, so this is a single-row lookup; then compare the
         # hash in constant time.
-        key = self.active().select_related("organization").filter(prefix=f"{parts[0]}_{parts[1]}").first()
+        key = self.active().select_related("organization__subscription__plan").filter(prefix=f"{parts[0]}_{parts[1]}").first()
         if key and hmac.compare_digest(key.key_hash, hash_api_key(raw_key)):
             return key
         return None

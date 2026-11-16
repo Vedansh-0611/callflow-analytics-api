@@ -34,6 +34,7 @@ INSTALLED_APPS = [
     "django_filters",
     "rest_framework_simplejwt",
     "accounts",
+    "billing",
     "calls",
 ]
 
@@ -117,7 +118,9 @@ REST_FRAMEWORK = {
     "NUM_PROXIES": int(os.environ.get("NUM_PROXIES", "0")),
 }
 
-API_KEY_THROTTLE_RATE = os.environ.get("API_KEY_THROTTLE_RATE", "120/min")
+# Per-key limits come from the org's plan. Set this to override them for every
+# key (handy for load tests).
+API_KEY_THROTTLE_RATE = os.environ.get("API_KEY_THROTTLE_RATE", "")
 AUTH_THROTTLE_RATE = os.environ.get("AUTH_THROTTLE_RATE", "10/min")
 
 # Redis when available, so rate-limit counters are shared by all workers.
@@ -161,6 +164,11 @@ if os.environ.get("MODEL_PRICING_JSON"):
     MODEL_PRICING.update(json.loads(os.environ["MODEL_PRICING_JSON"]))
 
 TELEPHONY_COST_PER_MINUTE = os.environ.get("TELEPHONY_COST_PER_MINUTE", "0.010")
+
+# Billing. New organizations start on this plan; see billing/providers.py for
+# where a real payment provider plugs in.
+DEFAULT_PLAN_CODE = "free"
+BILLING_PROVIDER = os.environ.get("BILLING_PROVIDER", "billing.providers.FakeBillingProvider")
 
 LOGGING = {
     "version": 1,

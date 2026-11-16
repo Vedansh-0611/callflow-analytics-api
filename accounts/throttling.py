@@ -3,22 +3,33 @@ so every gunicorn worker and every instance shares the same budget."""
 from django.conf import settings
 from rest_framework.throttling import SimpleRateThrottle, UserRateThrottle
 
+from billing.services import get_plan
+
 from .models import ApiKey
 
 
 class ApiKeyRateThrottle(SimpleRateThrottle):
-    """Requests per minute for each API key. Other requests are not counted here."""
+    """Requests per minute for each API key, as allowed by the org's plan.
+
+    Requests made without an API key are not counted here.
+    """
 
     scope = "api_key"
 
     def get_rate(self):
-        # Read at request time (DRF caches its settings at import), so the
-        # limit can be changed per environment and per test.
-        return settings.API_KEY_THROTTLE_RATE
+        # Placeholder; the real rate depends on the request (see allow_request).
+        return settings.API_KEY_THROTTLE_RATE or "60/min"
+
+    def allow_request(self, request, view):
+        if not isinstance(request.auth, ApiKey):
+            return True
+        plan = get_plan(request.auth.organization)
+        # Settings are read per request so an override applies without a restart.
+        self.rate = settings.API_KEY_THROTTLE_RATE or f"{plan.api_requests_per_minute}/min"
+        self.num_requests, self.duration = self.parse_rate(self.rate)
+        return super().allow_request(request, view)
 
     def get_cache_key(self, request, view):
-        if not isinstance(request.auth, ApiKey):
-            return None
         return self.cache_format % {"scope": self.scope, "ident": request.auth.pk}
 
 

@@ -3,6 +3,8 @@ from datetime import timedelta
 
 from django.db import IntegrityError, transaction
 
+from billing import services as billing
+
 from .models import Call, CallEvent
 from .tasks import summarize_call
 
@@ -12,15 +14,29 @@ def ingest_event(organization, payload):
 
     Returns (event, created). created is False when the event_id was already
     stored, which happens when the provider retries a delivery.
+
+    Raises billing.PlanLimitExceeded when the event would start a new call
+    and the organization has used up this month's plan.
     """
     try:
         with transaction.atomic():
-            call, _ = Call.objects.get_or_create(organization=organization, provider_call_id=payload["call_id"])
-            # Lock the call row so two events for the same call update it one at a time.
-            call = Call.objects.select_for_update().get(pk=call.pk)
-
+            # Retries are answered before any limit check, so a delivery that
+            # was accepted once is never refused later.
             if CallEvent.objects.filter(organization=organization, event_id=payload["event_id"]).exists():
                 return None, False
+
+            call = Call.objects.filter(organization=organization, provider_call_id=payload["call_id"]).first()
+            if call is None:
+                billing.check_can_start_call(organization)
+                call, created = Call.objects.get_or_create(
+                    organization=organization, provider_call_id=payload["call_id"]
+                )
+                if created:
+                    billing.record_call_started(organization)
+
+            # Lock the call row so two events for the same call update it one at a time.
+            call = Call.objects.select_for_update().get(pk=call.pk)
+            already_ended = call.ended_at is not None
 
             event = CallEvent.objects.create(
                 organization=organization,
@@ -31,6 +47,11 @@ def ingest_event(organization, payload):
                 data=payload.get("data") or {},
             )
             apply_event(call, event)
+
+            if event.type == CallEvent.Type.CALL_ENDED and not already_ended:
+                # Meter minutes once per call, even if the provider sends a
+                # second, corrected call.ended.
+                billing.record_call_minutes(organization, call.duration_seconds)
 
             if event.type == CallEvent.Type.CALL_ENDED:
                 # Only enqueue after the commit, so the worker sees the saved data.

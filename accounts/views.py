@@ -6,6 +6,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from billing import services as billing
+
 from . import services
 from .models import ApiKey
 from .serializers import (
@@ -134,6 +136,9 @@ class ApiKeyListCreateView(OrgScopedQuerysetMixin, generics.ListCreateAPIView):
     def create(self, request, *args, **kwargs):
         serializer = ApiKeySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        billing.check_resource_limit(
+            request.organization, "api_keys", ApiKey.objects.active().filter(organization=request.organization).count()
+        )
         api_key, raw_key = ApiKey.objects.create_key(
             organization=request.organization,
             name=serializer.validated_data["name"],
