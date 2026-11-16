@@ -1,0 +1,128 @@
+"""Generate realistic-looking demo calls by pushing fake events through the real
+ingestion code. Celery runs in eager mode here, so no worker is needed."""
+import random
+import uuid
+from datetime import timedelta
+
+from celery import current_app
+from django.core.management.base import BaseCommand
+from django.utils import timezone
+
+from calls.models import Call
+from calls.services import ingest_event
+
+AGENTS = ["clinic-receptionist", "loan-reminder", "order-support", "lead-qualifier"]
+MODELS = ["gpt-4o-mini", "gpt-4o", "claude-haiku"]
+END_REASONS = (
+    ["completed"] * 12 + ["customer_hangup"] * 4 + ["transferred"] * 2 + ["voicemail"] * 2 + ["error"]
+)
+TOOLS = ["book_appointment", "lookup_order", "send_sms", "check_balance", "transfer_to_human"]
+AGENT_LINES = [
+    "Hi, thanks for calling. How can I help you today?",
+    "Sure, let me check that for you.",
+    "I found two open slots tomorrow, 11 AM or 4 PM.",
+    "Done. You will get a confirmation SMS shortly.",
+    "Is there anything else I can help with?",
+]
+CALLER_LINES = [
+    "Hi, I wanted to book an appointment.",
+    "Can you tell me the status of my order?",
+    "Tomorrow works. Let's do 4 PM.",
+    "No, that's all. Thank you!",
+    "Can I speak to a person please?",
+]
+
+
+class Command(BaseCommand):
+    help = "Create fake demo calls spread over the last N days."
+
+    def add_arguments(self, parser):
+        parser.add_argument("--calls", type=int, default=200)
+        parser.add_argument("--days", type=int, default=14)
+        parser.add_argument("--seed", type=int, default=42, help="random seed for repeatable data")
+        parser.add_argument("--flush", action="store_true", help="delete existing calls first")
+
+    def handle(self, *args, **options):
+        current_app.conf.task_always_eager = True
+        rng = random.Random(options["seed"])
+
+        if options["flush"]:
+            Call.objects.all().delete()
+
+        now = timezone.now()
+        for _ in range(options["calls"]):
+            started_at = now - timedelta(
+                days=rng.randint(0, options["days"] - 1),
+                hours=rng.randint(0, 10),
+                minutes=rng.randint(10, 59),
+            )
+            for payload in self.fake_call_events(rng, started_at):
+                ingest_event(payload)
+
+        self.stdout.write(self.style.SUCCESS(f"Seeded {options['calls']} calls."))
+
+    def fake_call_events(self, rng, started_at):
+        call_id = f"call_{uuid.UUID(int=rng.getrandbits(128)).hex[:16]}"
+        end_reason = rng.choice(END_REASONS)
+        short = end_reason in ("voicemail", "error") or rng.random() < 0.1
+        duration = rng.randint(4, 14) if short else rng.randint(30, 420)
+        clock = started_at
+        n = 0
+
+        def event(type_, data, at):
+            nonlocal n
+            n += 1
+            return {
+                "event_id": f"{call_id}_evt_{n}",
+                "type": type_,
+                "call_id": call_id,
+                "timestamp": at,
+                "data": data,
+            }
+
+        events = [
+            event(
+                "call.started",
+                {
+                    "agent_id": rng.choice(AGENTS),
+                    "direction": rng.choice(["inbound", "inbound", "outbound"]),
+                    "from": f"+9198{rng.randint(10000000, 99999999)}",
+                    "to": "+918000000000",
+                },
+                clock,
+            )
+        ]
+
+        turns = 0 if short else rng.randint(2, 5)
+        step = duration / (turns * 2 + 2)
+        for i in range(turns):
+            clock += timedelta(seconds=step)
+            events.append(event("transcript.chunk", {"speaker": "agent", "text": AGENT_LINES[i % 5]}, clock))
+            clock += timedelta(seconds=step)
+            events.append(event("transcript.chunk", {"speaker": "caller", "text": CALLER_LINES[i % 5]}, clock))
+            if i == 1 and rng.random() < 0.6:
+                events.append(
+                    event(
+                        "tool.called",
+                        {"name": rng.choice(TOOLS), "success": rng.random() > 0.15, "latency_ms": rng.randint(80, 900)},
+                        clock,
+                    )
+                )
+
+        prompt_tokens = 0 if short else rng.randint(800, 6000)
+        events.append(
+            event(
+                "call.ended",
+                {
+                    "duration_seconds": duration,
+                    "end_reason": end_reason,
+                    "usage": {
+                        "model": rng.choice(MODELS),
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": prompt_tokens // rng.randint(4, 8),
+                    },
+                },
+                started_at + timedelta(seconds=duration),
+            )
+        )
+        return events
