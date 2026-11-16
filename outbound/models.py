@@ -12,7 +12,9 @@ class WebhookEndpoint(models.Model):
 
     EVENT_TYPES = ["call.summarized"]
 
-    organization = models.ForeignKey("accounts.Organization", on_delete=models.CASCADE, related_name="webhook_endpoints")
+    organization = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, related_name="webhook_endpoints"
+    )
     url = models.URLField(max_length=500)
     description = models.CharField(max_length=200, blank=True, default="")
     events = models.JSONField(default=list)

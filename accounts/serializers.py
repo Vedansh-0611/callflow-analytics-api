@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from .models import ApiKey, Membership, Organization
@@ -56,6 +57,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = ["id", "email", "name", "organizations"]
 
+    @extend_schema_field(MembershipOrgSerializer(many=True))
     def get_organizations(self, user):
         memberships = user.memberships.select_related("organization")
         return MembershipOrgSerializer(memberships, many=True).data
@@ -99,3 +101,16 @@ class NewApiKeySerializer(ApiKeySerializer):
 class WebhookSecretSerializer(serializers.Serializer):
     webhook_secret = serializers.CharField()
     previous_secret_expires_at = serializers.DateTimeField(allow_null=True)
+
+
+class TokenResponseSerializer(serializers.Serializer):
+    access = serializers.CharField()
+    refresh = serializers.CharField()
+    user = UserSerializer()
+
+
+class CurrentOrganizationWithRoleSerializer(CurrentOrganizationSerializer):
+    role = serializers.CharField(read_only=True)
+
+    class Meta(CurrentOrganizationSerializer.Meta):
+        fields = CurrentOrganizationSerializer.Meta.fields + ["role"]

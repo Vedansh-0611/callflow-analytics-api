@@ -6,7 +6,12 @@ from tests.conftest import user_client
 
 pytestmark = pytest.mark.django_db
 
-SIGNUP = {"email": "Asha@Example.com", "password": "a-long-passphrase", "name": "Asha", "organization_name": "Asha Clinics"}
+SIGNUP = {
+    "email": "Asha@Example.com",
+    "password": "a-long-passphrase",
+    "name": "Asha",
+    "organization_name": "Asha Clinics",
+}
 
 
 def test_signup_creates_user_org_and_owner_membership(api_client):
@@ -26,7 +31,9 @@ def test_signup_rejects_duplicate_email_and_weak_password(api_client):
     api_client.post("/api/auth/signup/", SIGNUP, format="json")
 
     duplicate = api_client.post("/api/auth/signup/", {**SIGNUP, "email": "asha@example.com"}, format="json")
-    weak = api_client.post("/api/auth/signup/", {**SIGNUP, "email": "b@example.com", "password": "12345678"}, format="json")
+    weak = api_client.post(
+        "/api/auth/signup/", {**SIGNUP, "email": "b@example.com", "password": "12345678"}, format="json"
+    )
 
     assert duplicate.status_code == 400 and "email" in duplicate.json()
     assert weak.status_code == 400 and "password" in weak.json()

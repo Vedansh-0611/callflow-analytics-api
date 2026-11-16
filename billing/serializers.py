@@ -32,3 +32,15 @@ class ChangePlanResultSerializer(serializers.Serializer):
     status = serializers.CharField()
     plan = serializers.CharField()
     redirect_url = serializers.URLField(allow_null=True)
+
+
+class BillingOverviewSerializer(serializers.Serializer):
+    plan = PlanSerializer()
+    status = serializers.CharField()
+    usage = UsageSerializer()
+    history = UsageSerializer(many=True)
+    plans = PlanSerializer(many=True)
+
+
+class ChangePlanResponseSerializer(BillingOverviewSerializer):
+    result = ChangePlanResultSerializer()

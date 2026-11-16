@@ -1,5 +1,6 @@
 from dataclasses import asdict
 
+from drf_spectacular.utils import extend_schema
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -8,7 +9,14 @@ from accounts.tenancy import IsOrgAdmin
 from . import services
 from .models import Plan
 from .providers import get_billing_provider
-from .serializers import ChangePlanResultSerializer, ChangePlanSerializer, PlanSerializer, UsageSerializer
+from .serializers import (
+    BillingOverviewSerializer,
+    ChangePlanResponseSerializer,
+    ChangePlanResultSerializer,
+    ChangePlanSerializer,
+    PlanSerializer,
+    UsageSerializer,
+)
 
 
 def billing_overview(org):
@@ -25,6 +33,7 @@ def billing_overview(org):
 class BillingView(APIView):
     """The organization's plan, this month's usage and the plans it can switch to."""
 
+    @extend_schema(responses=BillingOverviewSerializer, tags=["billing"])
     def get(self, request):
         return Response(billing_overview(request.organization))
 
@@ -38,6 +47,7 @@ class ChangePlanView(APIView):
 
     permission_classes = [IsOrgAdmin]
 
+    @extend_schema(request=ChangePlanSerializer, responses=ChangePlanResponseSerializer, tags=["billing"])
     def post(self, request):
         serializer = ChangePlanSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)

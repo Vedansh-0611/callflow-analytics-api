@@ -44,6 +44,8 @@ def resolve_tenant(request):
 def attach_tenant(request):
     if not hasattr(request, "organization"):
         request.organization, request.org_role = resolve_tenant(request)
+        # For the access log line (it only sees Django's request object).
+        request._request.organization_id_for_logs = request.organization.slug
     return request.organization
 
 

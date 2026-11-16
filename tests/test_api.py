@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -8,7 +8,7 @@ from calls.stats import build_stats
 
 pytestmark = pytest.mark.django_db
 
-NOW = datetime(2026, 1, 15, 18, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 15, 18, 0, tzinfo=UTC)
 
 
 def create_call(org, call_id, days_ago=0, duration=60, cost="0.10", status=Call.Status.COMPLETED, **extra):

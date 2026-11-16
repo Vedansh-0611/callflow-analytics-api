@@ -2,9 +2,9 @@ import json
 import logging
 
 from django.conf import settings
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import generics, status
 from rest_framework.exceptions import APIException
-from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -13,7 +13,13 @@ from accounts.tenancy import IsOrgMember, OrgScopedQuerysetMixin
 
 from .filters import CallFilter
 from .models import Call
-from .serializers import CallDetailSerializer, CallListSerializer, WebhookEventSerializer
+from .serializers import (
+    CallDetailSerializer,
+    CallListSerializer,
+    StatsSerializer,
+    WebhookAckSerializer,
+    WebhookEventSerializer,
+)
 from .services import ingest_event
 from .signatures import SignatureError, verify_signature
 from .stats import build_stats
@@ -39,6 +45,16 @@ class CallWebhookView(APIView):
     authentication_classes = [ApiKeyAuthentication]
     permission_classes = [IsOrgMember]
 
+    @extend_schema(
+        request=WebhookEventSerializer,
+        responses={202: WebhookAckSerializer, 200: WebhookAckSerializer},
+        parameters=[
+            OpenApiParameter("X-Webhook-Timestamp", str, OpenApiParameter.HEADER, required=True),
+            OpenApiParameter("X-Webhook-Signature", str, OpenApiParameter.HEADER, required=True,
+                             description='"sha256=" + HMAC-SHA256(org webhook secret, "<timestamp>.<raw body>")'),
+        ],
+        tags=["ingestion"],
+    )
     def post(self, request):
         org = request.organization
         # Refuse oversized bodies before reading them into memory. Content-Length
@@ -77,6 +93,7 @@ class CallWebhookView(APIView):
         return Response({"status": "accepted", "event_id": event.event_id}, status=status.HTTP_202_ACCEPTED)
 
 
+@extend_schema(tags=["analytics"])
 class CallListView(OrgScopedQuerysetMixin, generics.ListAPIView):
     queryset = Call.objects.all()
     serializer_class = CallListSerializer
@@ -86,6 +103,7 @@ class CallListView(OrgScopedQuerysetMixin, generics.ListAPIView):
     ordering = ["-started_at"]
 
 
+@extend_schema(tags=["analytics"])
 class CallDetailView(OrgScopedQuerysetMixin, generics.RetrieveAPIView):
     queryset = Call.objects.prefetch_related("events")
     serializer_class = CallDetailSerializer
@@ -94,6 +112,11 @@ class CallDetailView(OrgScopedQuerysetMixin, generics.RetrieveAPIView):
 
 
 class StatsView(APIView):
+    @extend_schema(
+        parameters=[OpenApiParameter("days", int, description="1 to 90, default 14")],
+        responses=StatsSerializer,
+        tags=["analytics"],
+    )
     def get(self, request):
         try:
             days = int(request.query_params.get("days", 14))
@@ -101,11 +124,3 @@ class StatsView(APIView):
             return Response({"detail": "days must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
         days = max(1, min(days, 90))
         return Response(build_stats(request.organization, days=days))
-
-
-class HealthView(APIView):
-    authentication_classes = []
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        return Response({"status": "ok"})

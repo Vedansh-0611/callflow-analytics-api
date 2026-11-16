@@ -11,7 +11,15 @@ class CallEventInline(admin.TabularInline):
 
 @admin.register(Call)
 class CallAdmin(admin.ModelAdmin):
-    list_display = ("provider_call_id", "organization", "agent_id", "status", "started_at", "duration_seconds", "cost_usd")
+    list_display = (
+        "provider_call_id",
+        "organization",
+        "agent_id",
+        "status",
+        "started_at",
+        "duration_seconds",
+        "cost_usd",
+    )
     list_filter = ("organization", "status", "direction", "agent_id")
     search_fields = ("provider_call_id", "from_number", "to_number")
     inlines = [CallEventInline]

@@ -56,3 +56,31 @@ class CallDetailSerializer(CallListSerializer):
             "summarized_at",
             "events",
         ]
+
+
+class WebhookAckSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=["accepted", "duplicate"])
+    event_id = serializers.CharField(required=False)
+
+
+class StatsTotalsSerializer(serializers.Serializer):
+    calls = serializers.IntegerField()
+    completed = serializers.IntegerField()
+    failed = serializers.IntegerField()
+    avg_duration = serializers.FloatField()
+    total_cost_usd = serializers.FloatField()
+    total_tokens = serializers.IntegerField()
+
+
+class StatsDaySerializer(serializers.Serializer):
+    date = serializers.DateField()
+    calls = serializers.IntegerField()
+    avg_duration = serializers.FloatField()
+    cost_usd = serializers.FloatField()
+
+
+class StatsSerializer(serializers.Serializer):
+    range = serializers.DictField()
+    totals = StatsTotalsSerializer()
+    per_day = StatsDaySerializer(many=True)
+    outcome_tags = serializers.DictField(child=serializers.IntegerField())

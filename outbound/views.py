@@ -1,5 +1,6 @@
 import uuid
 
+from drf_spectacular.utils import extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -12,6 +13,7 @@ from .serializers import WebhookDeliverySerializer, WebhookEndpointSerializer, W
 from .services import build_payload, enqueue
 
 
+@extend_schema(tags=["outbound webhooks"])
 class WebhookEndpointViewSet(OrgScopedQuerysetMixin, viewsets.ModelViewSet):
     """Where we send events such as call.summarized. Owners and admins only."""
 
@@ -20,6 +22,7 @@ class WebhookEndpointViewSet(OrgScopedQuerysetMixin, viewsets.ModelViewSet):
     serializer_class = WebhookEndpointSerializer
     pagination_class = None
 
+    @extend_schema(responses={201: WebhookEndpointWithSecretSerializer})
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -28,12 +31,14 @@ class WebhookEndpointViewSet(OrgScopedQuerysetMixin, viewsets.ModelViewSet):
         endpoint = serializer.save(organization=org)
         return Response(WebhookEndpointWithSecretSerializer(endpoint).data, status=status.HTTP_201_CREATED)
 
+    @extend_schema(request=None, responses=WebhookEndpointWithSecretSerializer)
     @action(detail=True, methods=["post"], url_path="rotate-secret")
     def rotate_secret(self, request, pk=None):
         endpoint = self.get_object()
         endpoint.rotate_secret()
         return Response(WebhookEndpointWithSecretSerializer(endpoint).data)
 
+    @extend_schema(request=None, responses={202: WebhookDeliverySerializer})
     @action(detail=True, methods=["post"])
     def test(self, request, pk=None):
         """Queue a `ping` event so the receiver can check its signature code."""
@@ -48,6 +53,7 @@ class WebhookEndpointViewSet(OrgScopedQuerysetMixin, viewsets.ModelViewSet):
         enqueue(delivery)
         return Response(WebhookDeliverySerializer(delivery).data, status=status.HTTP_202_ACCEPTED)
 
+    @extend_schema(responses=WebhookDeliverySerializer(many=True))
     @action(detail=True, methods=["get"])
     def deliveries(self, request, pk=None):
         """The 50 most recent deliveries to this endpoint."""

@@ -18,9 +18,16 @@ def env_list(name, default=""):
     return [item.strip() for item in os.environ.get(name, default).split(",") if item.strip()]
 
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-insecure-key-do-not-use-in-production")
+DEV_SECRET_KEY = "dev-only-insecure-key-do-not-use-in-production"
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", DEV_SECRET_KEY)
 DEBUG = env_bool("DJANGO_DEBUG", True)
+if not DEBUG and SECRET_KEY == DEV_SECRET_KEY:
+    raise RuntimeError("Set DJANGO_SECRET_KEY when DJANGO_DEBUG is false.")
+
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
+# Render tells each service its public hostname.
+if os.environ.get("RENDER_EXTERNAL_HOSTNAME"):
+    ALLOWED_HOSTS.append(os.environ["RENDER_EXTERNAL_HOSTNAME"])
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -33,6 +40,8 @@ INSTALLED_APPS = [
     "rest_framework",
     "django_filters",
     "rest_framework_simplejwt",
+    "drf_spectacular",
+    "core",
     "accounts",
     "billing",
     "calls",
@@ -40,7 +49,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "core.middleware.RequestIdMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -91,6 +102,31 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+# whitenoise serves the admin and API docs assets straight from gunicorn.
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"
+        if DEBUG
+        else "whitenoise.storage.CompressedManifestStaticFilesStorage"
+    },
+}
+
+# Security headers. In production everything is https behind a proxy that sets
+# X-Forwarded-Proto. DJANGO_SECURE_SSL=false turns the https-only parts off for
+# running the production image locally over plain http.
+SECURE_SSL = env_bool("DJANGO_SECURE_SSL", not DEBUG)
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_SSL_REDIRECT = SECURE_SSL
+SECURE_REDIRECT_EXEMPT = [r"^api/health/$", r"^api/ready/$"]  # platform probes use http
+SESSION_COOKIE_SECURE = SECURE_SSL
+CSRF_COOKIE_SECURE = SECURE_SSL
+SECURE_HSTS_SECONDS = 60 * 60 * 24 * 30 if SECURE_SSL else 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = SECURE_SSL
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "same-origin"
+X_FRAME_OPTIONS = "DENY"
+CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS", "")
 
 REST_FRAMEWORK = {
     # Dashboard users send a JWT; servers send an organization API key.
@@ -107,6 +143,7 @@ REST_FRAMEWORK = {
         "rest_framework.filters.SearchFilter",
         "rest_framework.filters.OrderingFilter",
     ],
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_THROTTLE_CLASSES": [
         "accounts.throttling.ApiKeyRateThrottle",
         "accounts.throttling.DashboardUserRateThrottle",
@@ -141,7 +178,29 @@ SIMPLE_JWT = {
     "UPDATE_LAST_LOGIN": True,
 }
 
+SPECTACULAR_SETTINGS = {
+    "TITLE": "CallFlow API",
+    "DESCRIPTION": (
+        "Multi-tenant call analytics for voice agents. Dashboard users authenticate with a JWT "
+        "(`Authorization: Bearer ...`, plus `X-Organization: <slug>` to pick a workspace). "
+        "Servers use an organization API key (`X-API-Key`). Webhooks must also be HMAC-signed."
+    ),
+    "VERSION": "2.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "COMPONENT_SPLIT_REQUEST": True,
+    "ENUM_NAME_OVERRIDES": {
+        "CallStatusEnum": "calls.models.Call.Status",
+        "DeliveryStatusEnum": "outbound.models.WebhookDelivery.Status",
+        "SubscriptionStatusEnum": "billing.models.Subscription.Status",
+        "WebhookAckStatusEnum": ["accepted", "duplicate"],
+    },
+}
+
+# The dashboard runs on another origin (localhost:5173, GitHub Pages). It sends
+# Authorization and X-Organization headers, never cookies.
 CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS", "http://localhost:5173")
+CORS_ALLOW_HEADERS = ["accept", "authorization", "content-type", "x-organization", "x-request-id"]
+CORS_EXPOSE_HEADERS = ["x-request-id", "retry-after"]
 
 # Celery
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", REDIS_URL or "redis://localhost:6379/0")
@@ -179,9 +238,39 @@ ALLOW_INSECURE_WEBHOOK_URLS = env_bool("ALLOW_INSECURE_WEBHOOK_URLS", DEBUG)
 DEFAULT_PLAN_CODE = "free"
 BILLING_PROVIDER = os.environ.get("BILLING_PROVIDER", "billing.providers.FakeBillingProvider")
 
+# Logging: JSON lines in production (one object per line, with request_id),
+# readable text in development. LOG_FORMAT overrides either way.
+LOG_FORMAT = os.environ.get("LOG_FORMAT", "text" if DEBUG else "json")
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
-    "handlers": {"console": {"class": "logging.StreamHandler"}},
-    "root": {"handlers": ["console"], "level": "INFO"},
+    "filters": {"request_id": {"()": "core.logging.RequestIdFilter"}},
+    "formatters": {
+        "json": {"()": "core.logging.JsonFormatter"},
+        "text": {"format": "%(asctime)s %(levelname)s [%(request_id)s] %(name)s: %(message)s"},
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "filters": ["request_id"], "formatter": LOG_FORMAT},
+    },
+    "root": {"handlers": ["console"], "level": os.environ.get("LOG_LEVEL", "INFO")},
+    "loggers": {
+        # Our access log replaces Django's own per-request warnings.
+        "django.request": {"level": "ERROR"},
+        "django.server": {"level": "ERROR"},
+    },
 }
+
+# Error tracking. Off unless SENTRY_DSN is set; no personal data is sent.
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+if SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.celery import CeleryIntegration
+    from sentry_sdk.integrations.django import DjangoIntegration
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[DjangoIntegration(), CeleryIntegration()],
+        environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
+        traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0")),
+        send_default_pii=False,
+    )
