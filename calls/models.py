@@ -11,8 +11,10 @@ class Call(models.Model):
         INBOUND = "inbound", "Inbound"
         OUTBOUND = "outbound", "Outbound"
 
-    # The id the telephony provider uses. Every webhook references it.
-    provider_call_id = models.CharField(max_length=64, unique=True)
+    organization = models.ForeignKey("accounts.Organization", on_delete=models.CASCADE, related_name="calls")
+    # The id the telephony provider uses. Every webhook references it. Unique per
+    # organization, since two customers' providers can reuse the same ids.
+    provider_call_id = models.CharField(max_length=64)
     agent_id = models.CharField(max_length=64, blank=True, default="")
     direction = models.CharField(max_length=16, choices=Direction.choices, blank=True, default="")
     from_number = models.CharField(max_length=32, blank=True, default="")
@@ -41,12 +43,16 @@ class Call(models.Model):
 
     class Meta:
         ordering = ["-started_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["organization", "provider_call_id"], name="unique_call_per_org"),
+        ]
+        # Every query is filtered by organization first, so it leads each index.
         indexes = [
             # List view default ordering and the stats date range filter.
-            models.Index(fields=["started_at"], name="call_started_idx"),
+            models.Index(fields=["organization", "started_at"], name="call_org_started_idx"),
             # Common dashboard filters combined with the date range.
-            models.Index(fields=["status", "started_at"], name="call_status_started_idx"),
-            models.Index(fields=["agent_id", "started_at"], name="call_agent_started_idx"),
+            models.Index(fields=["organization", "status", "started_at"], name="call_org_status_started_idx"),
+            models.Index(fields=["organization", "agent_id", "started_at"], name="call_org_agent_started_idx"),
         ]
 
     def __str__(self):
@@ -64,10 +70,12 @@ class CallEvent(models.Model):
         TOOL_CALLED = "tool.called", "Tool called"
         CALL_ENDED = "call.ended", "Call ended"
 
+    # Denormalized from the call so the idempotency constraint can be per org.
+    organization = models.ForeignKey("accounts.Organization", on_delete=models.CASCADE, related_name="+")
     call = models.ForeignKey(Call, on_delete=models.CASCADE, related_name="events")
     # Unique id sent by the provider. The unique constraint is what makes
     # webhook retries safe: the same event can never be stored twice.
-    event_id = models.CharField(max_length=64, unique=True)
+    event_id = models.CharField(max_length=64)
     type = models.CharField(max_length=32, choices=Type.choices)
     occurred_at = models.DateTimeField()
     data = models.JSONField(default=dict, blank=True)
@@ -75,6 +83,9 @@ class CallEvent(models.Model):
 
     class Meta:
         ordering = ["occurred_at", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["organization", "event_id"], name="unique_event_per_org"),
+        ]
         indexes = [
             # Timeline query: all events of one call in time order.
             models.Index(fields=["call", "occurred_at"], name="event_call_time_idx"),

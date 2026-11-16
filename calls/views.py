@@ -7,6 +7,9 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.authentication import ApiKeyAuthentication
+from accounts.tenancy import IsOrgMember, OrgScopedQuerysetMixin
+
 from .filters import CallFilter
 from .models import Call
 from .serializers import CallDetailSerializer, CallListSerializer, WebhookEventSerializer
@@ -18,16 +21,23 @@ logger = logging.getLogger(__name__)
 
 
 class CallWebhookView(APIView):
-    """Receives call events from the telephony provider."""
+    """Receives call events from the telephony provider.
 
-    # Webhooks authenticate with the HMAC signature, not the read API key.
-    permission_classes = [AllowAny]
+    Two checks, for two different questions:
+    - X-API-Key says which organization is sending (and is revocable).
+    - The HMAC signature, made with that organization's webhook secret, proves
+      the body was not changed and the request is recent.
+    """
+
+    authentication_classes = [ApiKeyAuthentication]
+    permission_classes = [IsOrgMember]
 
     def post(self, request):
+        org = request.organization
         raw_body = request.body  # verify the exact bytes that were signed
         try:
             verify_signature(
-                secret=settings.WEBHOOK_SECRET,
+                secret=org.active_webhook_secrets(),
                 timestamp=request.headers.get("X-Webhook-Timestamp"),
                 signature=request.headers.get("X-Webhook-Signature"),
                 body=raw_body,
@@ -45,14 +55,14 @@ class CallWebhookView(APIView):
         serializer = WebhookEventSerializer(data=body)
         serializer.is_valid(raise_exception=True)
 
-        event, created = ingest_event(serializer.validated_data)
+        event, created = ingest_event(org, serializer.validated_data)
         if not created:
             # Tell the provider it worked so it stops retrying.
             return Response({"status": "duplicate"}, status=status.HTTP_200_OK)
         return Response({"status": "accepted", "event_id": event.event_id}, status=status.HTTP_202_ACCEPTED)
 
 
-class CallListView(generics.ListAPIView):
+class CallListView(OrgScopedQuerysetMixin, generics.ListAPIView):
     queryset = Call.objects.all()
     serializer_class = CallListSerializer
     filterset_class = CallFilter
@@ -61,7 +71,7 @@ class CallListView(generics.ListAPIView):
     ordering = ["-started_at"]
 
 
-class CallDetailView(generics.RetrieveAPIView):
+class CallDetailView(OrgScopedQuerysetMixin, generics.RetrieveAPIView):
     queryset = Call.objects.prefetch_related("events")
     serializer_class = CallDetailSerializer
     lookup_field = "provider_call_id"
@@ -75,10 +85,11 @@ class StatsView(APIView):
         except ValueError:
             return Response({"detail": "days must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
         days = max(1, min(days, 90))
-        return Response(build_stats(days=days))
+        return Response(build_stats(request.organization, days=days))
 
 
 class HealthView(APIView):
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def get(self, request):

@@ -30,10 +30,10 @@ def test_zero_duration_call_has_no_telephony_cost(settings):
 
 
 @pytest.mark.django_db
-def test_summarize_call_sets_cost_and_tags(settings):
+def test_summarize_call_sets_cost_and_tags(settings, tenant):
     settings.TELEPHONY_COST_PER_MINUTE = "0.01"
     for payload in full_call(duration=125, tool_success=False):
-        ingest_event(payload)
+        ingest_event(tenant.org, payload)
     call = Call.objects.get(provider_call_id="call_1")
 
     result = summarize_call(call.pk)
@@ -46,9 +46,9 @@ def test_summarize_call_sets_cost_and_tags(settings):
 
 
 @pytest.mark.django_db
-def test_summarize_is_idempotent():
+def test_summarize_is_idempotent(tenant):
     for payload in full_call():
-        ingest_event(payload)
+        ingest_event(tenant.org, payload)
     call = Call.objects.get(provider_call_id="call_1")
 
     summarize_call(call.pk)
@@ -69,9 +69,9 @@ def test_summarize_is_idempotent():
         (90, "customer_hangup", ["customer_hung_up", "tool_used", "booking_made"]),
     ],
 )
-def test_outcome_tags(duration, end_reason, expected):
+def test_outcome_tags(duration, end_reason, expected, tenant):
     for payload in full_call(duration=duration, end_reason=end_reason):
-        ingest_event(payload)
+        ingest_event(tenant.org, payload)
     call = Call.objects.get(provider_call_id="call_1")
     summarize_call(call.pk)
     call.refresh_from_db()

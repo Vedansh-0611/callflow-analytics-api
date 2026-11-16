@@ -22,7 +22,14 @@ def compute_signature(secret: str, timestamp: str, body: bytes) -> str:
 
 
 def verify_signature(secret, timestamp, signature, body, tolerance=300, now=None):
-    if not secret:
+    """Raise SignatureError unless the request is signed and recent.
+
+    `secret` can be a list, so a request signed with either the current or the
+    just-rotated secret is accepted during the rotation grace period.
+    """
+    candidates = [secret] if isinstance(secret, str) else list(secret)
+    secrets = [s for s in candidates if s]
+    if not secrets:
         raise SignatureError("webhook secret is not configured")
     if not timestamp or not signature:
         raise SignatureError("missing signature headers")
@@ -36,8 +43,7 @@ def verify_signature(secret, timestamp, signature, body, tolerance=300, now=None
     if abs(now - sent_at) > tolerance:
         raise SignatureError("timestamp outside tolerance window")
 
-    expected = compute_signature(secret, timestamp, body)
     provided = signature.removeprefix("sha256=")
     # compare_digest takes the same time whether the strings match early or late.
-    if not hmac.compare_digest(expected, provided):
+    if not any(hmac.compare_digest(compute_signature(s, timestamp, body), provided) for s in secrets):
         raise SignatureError("signature mismatch")

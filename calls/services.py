@@ -7,22 +7,23 @@ from .models import Call, CallEvent
 from .tasks import summarize_call
 
 
-def ingest_event(payload):
-    """Store one validated webhook event.
+def ingest_event(organization, payload):
+    """Store one validated webhook event for an organization.
 
     Returns (event, created). created is False when the event_id was already
     stored, which happens when the provider retries a delivery.
     """
     try:
         with transaction.atomic():
-            call, _ = Call.objects.get_or_create(provider_call_id=payload["call_id"])
+            call, _ = Call.objects.get_or_create(organization=organization, provider_call_id=payload["call_id"])
             # Lock the call row so two events for the same call update it one at a time.
             call = Call.objects.select_for_update().get(pk=call.pk)
 
-            if CallEvent.objects.filter(event_id=payload["event_id"]).exists():
+            if CallEvent.objects.filter(organization=organization, event_id=payload["event_id"]).exists():
                 return None, False
 
             event = CallEvent.objects.create(
+                organization=organization,
                 call=call,
                 event_id=payload["event_id"],
                 type=payload["type"],

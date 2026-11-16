@@ -1,6 +1,8 @@
 """Send signed sample webhooks to a running API, like a telephony provider would.
 
-    python scripts/send_event.py                       # full sample call
+    export CALLFLOW_API_KEY=cf_...           # printed by `manage.py seed`
+    export CALLFLOW_WEBHOOK_SECRET=whsec_...
+    python scripts/send_event.py             # full sample call
     python scripts/send_event.py --url http://localhost:8000/api/webhooks/calls/
 
 Uses only the standard library so it works outside the virtualenv too.
@@ -21,7 +23,7 @@ def sign(secret, timestamp, body):
     return hmac.new(secret.encode(), f"{timestamp}.".encode() + body, hashlib.sha256).hexdigest()
 
 
-def send(url, secret, payload):
+def send(url, api_key, secret, payload):
     body = json.dumps(payload).encode()
     ts = str(int(time.time()))
     request = urllib.request.Request(
@@ -30,6 +32,7 @@ def send(url, secret, payload):
         method="POST",
         headers={
             "Content-Type": "application/json",
+            "X-API-Key": api_key,
             "X-Webhook-Timestamp": ts,
             "X-Webhook-Signature": "sha256=" + sign(secret, ts, body),
         },
@@ -66,18 +69,21 @@ def sample_call():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://localhost:8000/api/webhooks/calls/")
-    parser.add_argument("--secret", default=os.environ.get("WEBHOOK_SECRET", "local-dev-secret"))
+    parser.add_argument("--api-key", default=os.environ.get("CALLFLOW_API_KEY", ""))
+    parser.add_argument("--secret", default=os.environ.get("CALLFLOW_WEBHOOK_SECRET", ""))
     args = parser.parse_args()
+    if not args.api_key or not args.secret:
+        parser.error("set CALLFLOW_API_KEY and CALLFLOW_WEBHOOK_SECRET (run `manage.py seed` to get them)")
 
     call_id, events = sample_call()
     for payload in events:
-        status, text = send(args.url, args.secret, payload)
+        status, text = send(args.url, args.api_key, args.secret, payload)
         print(status, payload["type"], text)
     # Resend the last event to show idempotency: expect {"status": "duplicate"}.
-    status, text = send(args.url, args.secret, events[-1])
+    status, text = send(args.url, args.api_key, args.secret, events[-1])
     print(status, "retry of call.ended", text)
     base = args.url.split("/api/")[0]
-    print(f"\nView it: curl {base}/api/calls/{call_id}/")
+    print(f'\nView it: curl -H "X-API-Key: $CALLFLOW_API_KEY" {base}/api/calls/{call_id}/')
 
 
 if __name__ == "__main__":

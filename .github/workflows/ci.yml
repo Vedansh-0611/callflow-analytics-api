@@ -63,13 +63,17 @@ jobs:
           docker compose logs web
           exit 1
 
+      - name: Create the demo org, user and API key
+        run: docker compose exec -T web python manage.py seed --calls 0 | tee seed.txt | grep -v '^CALLFLOW_'
+
       - name: Send signed webhooks and check the worker summarized the call
         run: |
+          set -a; . <(grep '^CALLFLOW_' seed.txt); set +a
           python3 scripts/send_event.py | tee out.txt
           call_url=$(grep -o 'http://localhost:8000/api/calls/[a-z0-9_]*/' out.txt)
           for i in $(seq 1 15); do
-            if curl -s "$call_url" | grep -q '"summarized_at":"20'; then
-              curl -s "$call_url"; exit 0
+            if curl -s -H "X-API-Key: $CALLFLOW_API_KEY" "$call_url" | grep -q '"summarized_at":"20'; then
+              curl -s -H "X-API-Key: $CALLFLOW_API_KEY" "$call_url"; exit 0
             fi
             sleep 2
           done

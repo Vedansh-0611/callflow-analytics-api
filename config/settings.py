@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 
 import dj_database_url
@@ -17,7 +18,7 @@ def env_list(name, default=""):
     return [item.strip() for item in os.environ.get(name, default).split(",") if item.strip()]
 
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-insecure-key")
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-insecure-key-do-not-use-in-production")
 DEBUG = env_bool("DJANGO_DEBUG", True)
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
 
@@ -31,6 +32,8 @@ INSTALLED_APPS = [
     "corsheaders",
     "rest_framework",
     "django_filters",
+    "rest_framework_simplejwt",
+    "accounts",
     "calls",
 ]
 
@@ -71,6 +74,13 @@ DATABASES = {
     )
 }
 
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
@@ -81,15 +91,26 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
 REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": [],
-    "DEFAULT_PERMISSION_CLASSES": ["calls.permissions.HasApiKeyOrOpen"],
+    # Dashboard users send a JWT; servers send an organization API key.
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "accounts.authentication.ApiKeyAuthentication",
+    ],
+    # Deny by default: every endpoint needs a resolved organization unless it
+    # opts out explicitly (signup, login, health).
+    "DEFAULT_PERMISSION_CLASSES": ["accounts.tenancy.IsOrgMember"],
     "DEFAULT_PAGINATION_CLASS": "calls.pagination.StandardPagination",
     "DEFAULT_FILTER_BACKENDS": [
         "django_filters.rest_framework.DjangoFilterBackend",
         "rest_framework.filters.SearchFilter",
         "rest_framework.filters.OrderingFilter",
     ],
-    "UNAUTHENTICATED_USER": None,
+}
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.environ.get("JWT_ACCESS_MINUTES", "15"))),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=int(os.environ.get("JWT_REFRESH_DAYS", "7"))),
+    "UPDATE_LAST_LOGIN": True,
 }
 
 CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS", "http://localhost:5173")
@@ -102,12 +123,8 @@ CELERY_TASK_ACKS_LATE = True
 CELERY_TASK_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["json"]
 
-# Webhooks
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+# Inbound webhooks. Each organization has its own signing secret (in the DB).
 WEBHOOK_TOLERANCE_SECONDS = int(os.environ.get("WEBHOOK_TOLERANCE_SECONDS", "300"))
-
-# Read API key (optional)
-API_KEY = os.environ.get("API_KEY", "")
 
 # Pricing: USD per 1M tokens. "default" is used for unknown models.
 MODEL_PRICING = {

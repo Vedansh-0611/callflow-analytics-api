@@ -48,7 +48,19 @@ def test_webhook_endpoint_rejects_bad_signature(post_webhook):
     assert response.status_code == 401
 
 
+def test_any_of_several_secrets_is_accepted():
+    verify_signature(["new-secret", "s3cret"], str(NOW), sign(), BODY, now=NOW)
+    with pytest.raises(SignatureError, match="mismatch"):
+        verify_signature(["new-secret", "other"], str(NOW), sign(), BODY, now=NOW)
+
+
 @pytest.mark.django_db
-def test_webhook_endpoint_rejects_unsigned_request(api_client):
+def test_webhook_endpoint_rejects_unsigned_request(tenant):
+    response = tenant.key_client().post("/api/webhooks/calls/", {"event_id": "x"}, format="json")
+    assert response.status_code == 401
+
+
+@pytest.mark.django_db
+def test_webhook_endpoint_requires_an_api_key(api_client):
     response = api_client.post("/api/webhooks/calls/", {"event_id": "x"}, format="json")
     assert response.status_code == 401

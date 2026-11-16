@@ -11,9 +11,10 @@ pytestmark = pytest.mark.django_db
 NOW = datetime(2026, 1, 15, 18, 0, tzinfo=timezone.utc)
 
 
-def create_call(call_id, days_ago=0, duration=60, cost="0.10", status=Call.Status.COMPLETED, **extra):
+def create_call(org, call_id, days_ago=0, duration=60, cost="0.10", status=Call.Status.COMPLETED, **extra):
     started = NOW - timedelta(days=days_ago, hours=1)
     return Call.objects.create(
+        organization=org,
         provider_call_id=call_id,
         started_at=started,
         ended_at=started + timedelta(seconds=duration),
@@ -24,9 +25,20 @@ def create_call(call_id, days_ago=0, duration=60, cost="0.10", status=Call.Statu
     )
 
 
-def test_list_calls_is_paginated_and_newest_first(api_client):
+@pytest.fixture
+def org(tenant):
+    return tenant.org
+
+
+@pytest.fixture
+def api_client(tenant):
+    # Read endpoints accept both auth methods; these tests use the dashboard one.
+    return tenant.client()
+
+
+def test_list_calls_is_paginated_and_newest_first(api_client, org):
     for i in range(25):
-        create_call(f"c{i}", days_ago=i % 5)
+        create_call(org, f"c{i}", days_ago=i % 5)
 
     response = api_client.get("/api/calls/")
     body = response.json()
@@ -39,10 +51,10 @@ def test_list_calls_is_paginated_and_newest_first(api_client):
     assert started == sorted(started, reverse=True)
 
 
-def test_list_calls_filters(api_client):
-    create_call("a", agent_id="sales", duration=30)
-    create_call("b", agent_id="support", duration=300)
-    create_call("c", agent_id="support", duration=10, status=Call.Status.FAILED)
+def test_list_calls_filters(api_client, org):
+    create_call(org, "a", agent_id="sales", duration=30)
+    create_call(org, "b", agent_id="support", duration=300)
+    create_call(org, "c", agent_id="support", duration=10, status=Call.Status.FAILED)
 
     def ids(query):
         return sorted(row["id"] for row in api_client.get(f"/api/calls/?{query}").json()["results"])
@@ -53,10 +65,12 @@ def test_list_calls_filters(api_client):
     assert ids("search=a") == ["a"]
 
 
-def test_call_detail_includes_timeline(api_client):
-    call = create_call("c1")
-    CallEvent.objects.create(call=call, event_id="e2", type="call.ended", occurred_at=NOW)
-    CallEvent.objects.create(call=call, event_id="e1", type="call.started", occurred_at=NOW - timedelta(minutes=1))
+def test_call_detail_includes_timeline(api_client, org):
+    call = create_call(org, "c1")
+    CallEvent.objects.create(organization=org, call=call, event_id="e2", type="call.ended", occurred_at=NOW)
+    CallEvent.objects.create(
+        organization=org, call=call, event_id="e1", type="call.started", occurred_at=NOW - timedelta(minutes=1)
+    )
 
     response = api_client.get("/api/calls/c1/")
 
@@ -68,19 +82,20 @@ def test_call_detail_404(api_client):
     assert api_client.get("/api/calls/missing/").status_code == 404
 
 
-def test_api_key_is_enforced_when_configured(api_client, settings):
-    settings.API_KEY = "k"
-    assert api_client.get("/api/calls/").status_code == 403
-    assert api_client.get("/api/calls/", HTTP_X_API_KEY="k").status_code == 200
+def test_read_api_also_accepts_the_org_api_key(tenant, org):
+    create_call(org, "c1")
+    response = tenant.key_client().get("/api/calls/")
+    assert response.status_code == 200
+    assert response.json()["count"] == 1
 
 
-def test_stats_aggregates_per_day():
-    create_call("today-1", days_ago=0, duration=60, cost="0.10", outcome_tags=["resolved"])
-    create_call("today-2", days_ago=0, duration=120, cost="0.30", outcome_tags=["resolved", "tool_used"])
-    create_call("two-days", days_ago=2, duration=30, cost="0.05", status=Call.Status.FAILED)
-    create_call("too-old", days_ago=30)
+def test_stats_aggregates_per_day(org):
+    create_call(org, "today-1", days_ago=0, duration=60, cost="0.10", outcome_tags=["resolved"])
+    create_call(org, "today-2", days_ago=0, duration=120, cost="0.30", outcome_tags=["resolved", "tool_used"])
+    create_call(org, "two-days", days_ago=2, duration=30, cost="0.05", status=Call.Status.FAILED)
+    create_call(org, "too-old", days_ago=30)
 
-    stats = build_stats(days=7, now=NOW)
+    stats = build_stats(org, days=7, now=NOW)
 
     assert stats["totals"]["calls"] == 3
     assert stats["totals"]["completed"] == 2

@@ -12,14 +12,14 @@ def _money(value):
     return round(float(value or 0), 4)
 
 
-def build_stats(days=14, now=None):
-    """Aggregate numbers for the dashboard over the last `days` days.
+def build_stats(organization, days=14, now=None):
+    """Aggregate one organization's numbers over the last `days` days.
 
     Days without calls are filled with zeros so charts get a continuous axis.
     """
     now = now or timezone.now()
     first_day = (now - timedelta(days=days - 1)).date()
-    calls = Call.objects.filter(started_at__date__gte=first_day, started_at__lte=now)
+    calls = Call.objects.filter(organization=organization, started_at__date__gte=first_day, started_at__lte=now)
 
     totals = calls.aggregate(
         calls=Count("id"),
