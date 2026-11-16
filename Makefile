@@ -1,6 +1,6 @@
 PY ?= .venv/bin/python
 
-.PHONY: install migrate run worker test seed up down logs webhook
+.PHONY: install migrate run worker test lint schema seed up down logs webhook
 
 install:            ## create a virtualenv and install dependencies
 	python3 -m venv .venv
@@ -18,7 +18,13 @@ worker:             ## Celery worker (needs Redis)
 test:
 	.venv/bin/pytest
 
-seed:               ## 200 demo calls over the last 14 days
+lint:
+	.venv/bin/ruff check .
+
+schema:             ## validate the OpenAPI schema (served at /api/docs/)
+	$(PY) manage.py spectacular --validate --fail-on-warn --file /dev/null
+
+seed:               ## demo org, user, API key and 200 calls over the last 14 days
 	$(PY) manage.py seed --calls 200 --days 14 --flush
 
 up:                 ## full stack: web, worker, postgres, redis
@@ -31,5 +37,5 @@ down:
 logs:
 	docker compose logs -f web worker
 
-webhook:            ## send one signed sample event to the local API
+webhook:            ## send a signed sample call (needs CALLFLOW_API_KEY and CALLFLOW_WEBHOOK_SECRET)
 	$(PY) scripts/send_event.py

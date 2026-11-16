@@ -1,0 +1,78 @@
+# Render Blueprint: New > Blueprint > pick this repo. Creates the API, the
+# Celery worker, Postgres and Redis (Key Value), wired together.
+#
+# Free tier note: Render has no free background workers. To run at $0, delete
+# the worker service below and set CELERY_TASK_ALWAYS_EAGER=true on the web
+# service; tasks then run inside the web request instead of in the background.
+
+envVarGroups:
+  - name: callflow-shared
+    envVars:
+      - key: DJANGO_DEBUG
+        value: "false"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_ALLOWED_HOSTS
+        value: ".onrender.com"
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://vedansh-0611.github.io
+      - key: NUM_PROXIES
+        value: "1"
+      - key: LOG_FORMAT
+        value: json
+      - key: SENTRY_DSN
+        sync: false # optional: paste a DSN in the dashboard to enable Sentry
+
+services:
+  - type: web
+    name: callflow-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerCommand: docker/entrypoint.sh web
+    healthCheckPath: /api/health/
+    envVars:
+      - fromGroup: callflow-shared
+      - key: DATABASE_URL
+        fromDatabase:
+          name: callflow-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: callflow-redis
+          property: connectionString
+      - key: WEB_CONCURRENCY
+        value: "2"
+
+  - type: worker
+    name: callflow-worker
+    runtime: docker
+    plan: starter
+    region: singapore
+    dockerCommand: docker/entrypoint.sh worker
+    envVars:
+      - fromGroup: callflow-shared
+      - key: DATABASE_URL
+        fromDatabase:
+          name: callflow-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: callflow-redis
+          property: connectionString
+
+  - type: keyvalue
+    name: callflow-redis
+    plan: free
+    region: singapore
+    maxmemoryPolicy: noeviction # queued tasks must never be evicted
+    ipAllowList: [] # only reachable from services in this account
+
+databases:
+  - name: callflow-db
+    plan: free
+    region: singapore
+    databaseName: callflow
+    user: callflow

@@ -6,6 +6,16 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.17.5
+      - run: ruff check .
+
   test:
     runs-on: ubuntu-latest
 
@@ -42,22 +52,25 @@ jobs:
       - name: Check for missing migrations
         run: python manage.py makemigrations --check --dry-run
 
+      - name: Validate the OpenAPI schema
+        run: python manage.py spectacular --validate --fail-on-warn --file /dev/null
+
       - name: Run tests (Postgres)
         run: pytest -v
 
-  docker-smoke-test:
+  docker-e2e:
     runs-on: ubuntu-latest
-    needs: test
+    needs: [lint, test]
     steps:
       - uses: actions/checkout@v4
 
       - name: Start the stack (web, worker, postgres, redis)
         run: docker compose up --build -d
 
-      - name: Wait for the API
+      - name: Wait until the API is ready (database and Redis reachable)
         run: |
           for i in $(seq 1 30); do
-            curl -sf http://localhost:8000/api/health/ && exit 0
+            curl -sf http://localhost:8000/api/ready/ && exit 0
             sleep 2
           done
           docker compose logs web
@@ -79,6 +92,24 @@ jobs:
           done
           docker compose logs worker
           exit 1
+
+      - name: Check auth, tenancy and docs from outside
+        run: |
+          set -a; . <(grep '^CALLFLOW_' seed.txt); set +a
+          # No credentials: 401. Revoked-looking key: 401.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/calls/)" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'X-API-Key: cf_00000000_nope' http://localhost:8000/api/calls/)" = 401
+          # Dashboard login works and returns a usable JWT.
+          token=$(curl -sf -X POST http://localhost:8000/api/auth/login/ -H 'Content-Type: application/json' \
+            -d '{"email":"demo@callflow.dev","password":"callflow-demo"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["access"])')
+          curl -sf -H "Authorization: Bearer $token" http://localhost:8000/api/billing/ | python3 -m json.tool | head -20
+          # Static assets for the docs are served by whitenoise.
+          curl -sf http://localhost:8000/api/docs/ > /dev/null
+          curl -sfI http://localhost:8000/api/health/ | grep -i x-request-id
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
 
       - name: Stop the stack
         if: always()

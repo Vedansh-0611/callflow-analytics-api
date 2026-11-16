@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 
 def sign(secret, timestamp, body):
@@ -46,7 +46,7 @@ def send(url, api_key, secret, payload):
 
 def sample_call():
     call_id = "call_" + uuid.uuid4().hex[:12]
-    start = datetime.now(timezone.utc) - timedelta(minutes=3)
+    start = datetime.now(UTC) - timedelta(minutes=3)
 
     def at(seconds):
         return (start + timedelta(seconds=seconds)).isoformat()
